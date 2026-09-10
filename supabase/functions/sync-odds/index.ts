@@ -47,13 +47,12 @@ Deno.serve(async (req) => {
     for (const competition of competitions) {
       const sportKey = competition.odds_api_sport_key;
       const [run] = await sql<{ id: string }[]>`
-        insert into public.odds_sync_runs (sport_key)
+        insert into private.odds_sync_runs (sport_key)
         values (${sportKey})
         returning id
       `;
 
       try {
-        // /events is quota-free, so use it to avoid spending credits on inactive leagues.
         const eventsUrl = `${baseUrl}/sports/${encodeURIComponent(sportKey)}/events?apiKey=${encodeURIComponent(apiKey)}&dateFormat=iso`;
         const eventsResponse = await fetch(eventsUrl);
         if (!eventsResponse.ok) throw new Error(`Events API ${eventsResponse.status}: ${await eventsResponse.text()}`);
@@ -65,7 +64,7 @@ Deno.serve(async (req) => {
 
         if (!relevant.length) {
           await sql`
-            update public.odds_sync_runs
+            update private.odds_sync_runs
             set status='skipped', finished_at=now(), events_seen=${listedEvents.length}
             where id=${run.id}
           `;
@@ -117,7 +116,7 @@ Deno.serve(async (req) => {
         }
 
         await sql`
-          update public.odds_sync_runs
+          update private.odds_sync_runs
           set status='success', finished_at=now(), events_seen=${oddsEvents.length},
               market_rows_written=${written}, requests_remaining=${quota.remaining},
               requests_used=${quota.used}, request_cost=${quota.cost}
@@ -128,7 +127,7 @@ Deno.serve(async (req) => {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await sql`
-          update public.odds_sync_runs
+          update private.odds_sync_runs
           set status='failed', finished_at=now(), error_message=${message.slice(0, 1000)}
           where id=${run.id}
         `;
