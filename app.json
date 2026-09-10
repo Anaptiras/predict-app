@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Predict.",
+    "slug": "predict-app",
+    "version": "0.2.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.predict.app"
+    },
+    "android": {
+      "package": "com.predict.app"
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
