@@ -2,6 +2,7 @@ node_modules/
 .expo/
 .env
 .env.*.local
+supabase/.env
 dist/
 web-build/
 .DS_Store
