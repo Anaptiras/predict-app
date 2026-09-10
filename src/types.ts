@@ -1,0 +1,9 @@
+export type ConfidenceLevel='very_low'|'low'|'medium'|'high'|'very_high';
+export type Profile={id:string;username:string;display_name:string|null;country:string|null;bio:string|null;avatar_url:string|null;is_adult_confirmed:boolean;created_at:string};
+export type Competition={id:string;name:string;country:string|null;sport:string};
+export type Event={id:string;competition_id:string|null;home_name:string;away_name:string;kickoff_at:string;status:string;home_score:number|null;away_score:number|null;competition?:Competition|null};
+export type MarketSnapshot={id:string;event_id:string;market_type:string;selection:string;reference_odds:number;captured_at:string;provider:string|null};
+export type RatingRecord={user_id:string;scope_type:'overall'|'competition'|'market';scope_key:string;rating:number;confidence:ConfidenceLevel;sample_size:number;roi:number|null;clv:number|null;hit_rate:number|null;updated_at:string};
+export type Prediction={id:string;user_id:string;event_id:string;market_type:string;selection:string;reference_odds:number;odds_captured_at:string;confidence:number;units:number;analysis:string|null;status:'pending'|'win'|'loss'|'void';closing_odds:number|null;settled_at:string|null;created_at:string;profile?:Profile|null;event?:Event|null;overall_rating?:RatingRecord|null;likes_count?:number;comments_count?:number;liked_by_me?:boolean};
+export type RankingEntry={profile:Profile;rating:RatingRecord;followers_count:number};
+export type ProfileSummary={profile:Profile;overall_rating:RatingRecord|null;followers_count:number;following_count:number;predictions_count:number;specializations:RatingRecord[]};
