@@ -2,182 +2,142 @@
 
 **Predict. Prove it.**
 
-v0.3 connects the product to **The Odds API v4** through Supabase Edge Functions. The API credential is intentionally kept server-side and is never included in the React Native bundle or committed to GitHub.
+v0.3 is now connected to the production Supabase project and **The Odds API v4**.
 
-## What v0.3 adds
+## Production status
 
-- Real football fixtures from The Odds API
-- Real European bookmaker odds
-- 1X2 / Match Winner market ingestion (`h2h`)
-- Median consensus reference price across available bookmakers
-- Snapshot history for future CLV calculations
-- API quota telemetry (`x-requests-remaining`, `x-requests-used`, `x-requests-last`)
-- Quota-aware sync: first checks the quota-free `/events` endpoint and only spends odds credits when a selected league has a match inside the configured horizon
-- Supported league mapping for Premier League, UEFA Champions League, La Liga, Serie A, Bundesliga, Super League Greece, UEFA Europa League and UEFA Conference League
-- Scores sync Edge Function for event status/results
-- Prediction publishing accepts only fresh provider-backed odds snapshots
+The backend is live and verified end-to-end:
+
+- Supabase project: `predict-app` in `eu-central-1`
+- real football fixtures are being ingested
+- real European 1X2 odds are being ingested
+- odds are stored as median consensus across available bookmakers
+- scores sync is deployed and working
+- API quota usage is recorded in a private schema
+- Odds API credentials are encrypted in Supabase Vault
+- mobile clients never receive the Odds API key
+- Supabase Security Advisor currently reports 0 security lints
+
+The first production test successfully imported Premier League, UEFA Champions League and Super League Greece fixtures and market snapshots.
 
 ## Architecture
 
 ```text
 The Odds API
      │
-     │ HTTPS (API key only on server)
      ▼
-Supabase Edge Function: sync-odds
+Supabase Edge Functions
+  sync-odds / sync-scores
      │
-     ├── events → public.events
-     ├── median bookmaker consensus → public.markets
-     └── quota metadata → public.odds_sync_runs
+     ├── API key + internal sync secret → Supabase Vault
+     ├── fixtures/results → public.events
+     ├── median consensus odds → public.markets
+     └── quota telemetry → private.odds_sync_runs
                          │
                          ▼
                Supabase Postgres
                          │
                          ▼
-                 React Native app
-                         │
-                         └── create_prediction_from_market(...)
-                             copies trusted market snapshot server-side
+                React Native app
 ```
 
-The mobile app never knows the Odds API key.
+## Security model
 
-## Important security rule
+### Odds API credential
 
-Do **not** place the Odds API key in `.env` as an `EXPO_PUBLIC_*` variable. Expo public variables are embedded in the client application and can be extracted.
-
-The key belongs in a Supabase Edge Function secret named `ODDS_API_KEY`.
-
-Because API keys should be treated like passwords, rotate any key that has been pasted into chat, source code, tickets or other shared text before production use.
-
-## Database setup
-
-### Fresh project
-
-Run, in order:
+The Odds API key is stored under the Vault secret name:
 
 ```text
-backend/schema.sql
-backend/migrations/003_odds_api.sql
+odds_api_key
 ```
 
-Do not run `backend/seed.sql` once the real odds integration is enabled unless you explicitly want demo fixtures too.
-
-### Existing v0.2 project
-
-Run:
+The internal Edge Function caller secret is stored as:
 
 ```text
-backend/migrations/003_odds_api.sql
+odds_sync_secret
 ```
 
-This adds The Odds API league mapping, snapshot metadata, sync telemetry and the stricter provider-backed prediction RPC.
+No real secret value is committed to GitHub.
 
-## Supabase secrets
+The Edge Functions read Vault through the server-only `SUPABASE_DB_URL` connection that Supabase provides to hosted functions.
 
-Set server-side secrets with the Supabase CLI or dashboard:
+### Prediction integrity
 
-```bash
-supabase secrets set ODDS_API_KEY='<YOUR_KEY>'
-supabase secrets set ODDS_API_REGIONS='eu'
-supabase secrets set ODDS_SYNC_SECRET='<LONG_RANDOM_SECRET>'
+The app calls:
+
+```sql
+create_prediction_from_market(...)
 ```
 
-`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are read only inside the Edge Function environment. Never expose the service-role key to the app.
+The function is `SECURITY INVOKER`, not `SECURITY DEFINER`.
 
-## Deploy Edge Functions
+An RLS INSERT policy independently requires every authoritative prediction field to match a recent trusted The Odds API market snapshot. Direct REST insertion therefore cannot be used to invent odds or bypass the prediction cut-off.
 
-```bash
-supabase functions deploy sync-odds
-supabase functions deploy sync-scores
+Checks include:
+
+1. signed-in user owns the prediction;
+2. status begins as `pending`;
+3. no closing odds/settlement can be supplied by the client;
+4. market/selection/reference odds/timestamp must exactly match a stored provider snapshot;
+5. snapshot must be no more than 15 minutes old;
+6. prediction must be created at least 5 minutes before kickoff.
+
+Core fields remain immutable after publication.
+
+## Real data currently supported
+
+- Premier League
+- UEFA Champions League
+- La Liga
+- Serie A
+- Bundesliga
+- Super League Greece
+- UEFA Europa League
+- UEFA Conference League
+
+Current MVP market:
+
+```text
+h2h → Match Winner / 1X2
 ```
 
-Both functions additionally require the private `x-sync-secret` header, so a valid JWT alone is not enough to run a sync.
+## Reference odds
 
-## Trigger an odds sync
-
-Example request body:
-
-```json
-{
-  "horizonHours": 48,
-  "regions": "eu"
-}
-```
-
-Optionally sync only selected competitions:
-
-```json
-{
-  "sportKeys": [
-    "soccer_epl",
-    "soccer_uefa_champs_league",
-    "soccer_greece_super_league"
-  ],
-  "horizonHours": 48
-}
-```
-
-The function first calls `/events`, which The Odds API documents as not consuming quota. It calls `/odds` only when the league has a game inside the requested horizon.
-
-## Reference odds methodology
-
-For each Match Winner selection, v0.3 collects the available bookmaker prices returned for the configured region and stores the **median decimal price**.
+For every outcome, available European bookmaker prices are collected and the **median decimal price** is stored.
 
 Example:
 
 ```text
-Arsenal prices: 2.10, 2.12, 2.15, 2.18, 2.25
-Reference price: 2.15
+2.10, 2.12, 2.15, 2.18, 2.25
+→ reference odds 2.15
 ```
 
-Stored metadata includes `reference_odds`, `bookmaker_count`, `captured_at`, `source_last_update`, `provider` and `consensus_method = median`.
+The database also stores bookmaker count, provider update time and captured timestamp for future CLV calculations.
 
-This avoids tying Predictor Rating to one bookmaker and preserves snapshots for later closing-line calculations.
+## Edge Functions
 
-## Prediction integrity
+Deployed functions:
 
-The mobile client submits only a `marketId`, confidence, units and optional analysis.
-
-`create_prediction_from_market(...)` then verifies server-side that:
-
-1. the user is authenticated;
-2. the event is still at least 5 minutes from kickoff;
-3. the snapshot came from The Odds API integration;
-4. the reference snapshot is not older than 15 minutes;
-5. odds/selection/timestamp are copied from Postgres rather than supplied by the mobile client.
-
-After publication, core prediction fields remain immutable.
-
-## Scores
-
-`sync-scores` updates scheduled/live/completed status, home score and away score.
-
-It deliberately **does not automatically settle predictions yet**. Soccer settlement rules need a defined rules engine for regulation time, extra time, postponed/abandoned matches and future non-1X2 markets. That belongs in the next settlement milestone rather than guessing from a final score.
-
-## API quota strategy
-
-The Odds API charges the odds endpoint based on markets × regions. v0.3 therefore defaults to one region (`eu`) and one market (`h2h`).
-
-Recommended early-stage strategy:
-
-- invoke `sync-odds` every 30–60 minutes normally;
-- increase cadence near kickoff only for leagues that actually have upcoming matches;
-- keep one region (`eu`) during MVP;
-- keep only `h2h` until the prediction/reputation loop is validated.
-
-The `odds_sync_runs` table records quota headers after each successful odds request so usage can be monitored before expanding coverage.
-
-## Mobile environment
-
-The mobile app still uses only Supabase public credentials:
-
-```env
-EXPO_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_SUPABASE_PUBLISHABLE_KEY
+```text
+sync-odds
+sync-scores
 ```
 
-## Run the app
+Both use custom backend authentication through the Vault-backed `x-sync-secret` value. They are not user-facing APIs.
+
+`sync-odds` first checks the quota-free `/events` endpoint and only calls the paid odds endpoint when the league has a match inside the configured horizon.
+
+## Mobile configuration
+
+`.env.example` already contains the production Supabase project URL and **publishable** key. The publishable key is safe for mobile/frontend use because authorization is enforced by RLS.
+
+Create the local file:
+
+```bash
+cp .env.example .env
+```
+
+Then:
 
 ```bash
 npm install
@@ -185,24 +145,37 @@ npm run typecheck
 npm start
 ```
 
-## Current v0.3 boundary
+## Scores and settlement
 
-Working product layer:
+`sync-scores` currently updates:
 
-- authentication
-- profiles
-- follows
-- likes/comments/reports
-- real upcoming football events
-- real 1X2 reference odds
-- immutable predictions
-- rankings/reputation data model
-- community consensus
+- `scheduled`
+- `live`
+- `completed`
+- home score
+- away score
 
-Next milestone:
+Automatic prediction settlement is deliberately not enabled yet. The next milestone is a football settlement rules engine that explicitly handles regulation time, draws, postponements/abandonments and later additional market types.
 
-- automated, rules-correct settlement
-- closing odds selection from stored snapshots
-- CLV calculation
-- ROI and confidence engine
+## Database migrations
+
+Current sequence:
+
+```text
+backend/schema.sql
+backend/migrations/003_odds_api.sql
+backend/migrations/004_security_hardening.sql
+```
+
+Production already has these changes applied.
+
+## Next milestone — v0.4
+
+- automatic rules-correct settlement for 1X2
+- select a closing odds snapshot
+- calculate CLV
+- calculate unit-based ROI
+- rating confidence by sample size
 - Predictor Rating v1
+- competition specialization ratings
+- leaderboard eligibility rules
