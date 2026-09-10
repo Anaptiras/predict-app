@@ -1,123 +1,183 @@
-# Predict. — MVP v0.2
+# Predict. — MVP v0.3
 
 **Predict. Prove it.**
 
-A mobile-first social network where sports predictions build a permanent, verifiable reputation record. v0.2 replaces the v0.1 mock-only data layer with real Supabase authentication and database operations while keeping football/odds ingestion as the next milestone.
+v0.3 connects the product to **The Odds API v4** through Supabase Edge Functions. The API credential is intentionally kept server-side and is never included in the React Native bundle or committed to GitHub.
 
-## What changed in v0.2
+## What v0.3 adds
 
-### Real accounts
-- Supabase email/password sign-up and sign-in
-- Persistent sessions on React Native via AsyncStorage
-- Automatic `profiles` row when a new Auth user is created
-- 18+ confirmation gate after first sign-in
-- Sign-out
+- Real football fixtures from The Odds API
+- Real European bookmaker odds
+- 1X2 / Match Winner market ingestion (`h2h`)
+- Median consensus reference price across available bookmakers
+- Snapshot history for future CLV calculations
+- API quota telemetry (`x-requests-remaining`, `x-requests-used`, `x-requests-last`)
+- Quota-aware sync: first checks the quota-free `/events` endpoint and only spends odds credits when a selected league has a match inside the configured horizon
+- Supported league mapping for Premier League, UEFA Champions League, La Liga, Serie A, Bundesliga, Super League Greece, UEFA Europa League and UEFA Conference League
+- Scores sync Edge Function for event status/results
+- Prediction publishing accepts only fresh provider-backed odds snapshots
 
-### Real database-backed social layer
-- Live prediction feed from Postgres
-- Upcoming match list from `events`
-- Latest odds snapshots from `markets`
-- Likes stored in `prediction_likes`
-- Comments stored in `comments`
-- Follow/unfollow stored in `follows`
-- Following-only feed filter
-- Prediction reporting stored in `reports`
-- Blocking data model and API service included
-- Profile counts for predictions / followers / following
-- Public overall ratings and specialization records
-
-### Prediction integrity upgrade
-The client no longer inserts authoritative odds directly into `predictions`.
-
-A prediction is created through the Postgres RPC:
-
-```sql
-create_prediction_from_market(...)
-```
-
-The server function:
-1. Requires an authenticated user.
-2. Loads a real `markets` row by ID.
-3. Copies the event, market type, selection, odds and captured timestamp from that snapshot.
-4. Rejects stale market snapshots.
-5. Rejects predictions after the event cut-off.
-6. Writes the immutable prediction.
-
-The app therefore cannot simply submit a fake `@2.80` price when the database snapshot says `@2.15`.
-
-### Still protected server-side
-- Match, market, selection, reference odds, confidence, units and original timestamp are immutable after publish.
-- Users cannot settle their own predictions.
-- Closing odds and Win/Loss/Void require trusted backend/service-role code.
-- Settled analysis is locked.
-
-## Stack
-
-- Expo / React Native
-- TypeScript
-- Supabase Auth
-- Supabase Postgres
-- Supabase Row Level Security
-- AsyncStorage for persisted auth sessions
-
-## Project structure
+## Architecture
 
 ```text
-predict-app/
-├── App.tsx
-├── app.json
-├── package.json
-├── .env.example
-├── backend/
-│   ├── schema.sql
-│   └── seed.sql
-└── src/
-    ├── context/
-    │   └── AuthContext.tsx
-    ├── lib/
-    │   └── supabase.ts
-    ├── services/
-    │   └── api.ts
-    ├── theme.ts
-    └── types.ts
+The Odds API
+     │
+     │ HTTPS (API key only on server)
+     ▼
+Supabase Edge Function: sync-odds
+     │
+     ├── events → public.events
+     ├── median bookmaker consensus → public.markets
+     └── quota metadata → public.odds_sync_runs
+                         │
+                         ▼
+               Supabase Postgres
+                         │
+                         ▼
+                 React Native app
+                         │
+                         └── create_prediction_from_market(...)
+                             copies trusted market snapshot server-side
 ```
 
-## 1. Create Supabase project
+The mobile app never knows the Odds API key.
 
-Create a Supabase project and open **SQL Editor**.
+## Important security rule
+
+Do **not** place the Odds API key in `.env` as an `EXPO_PUBLIC_*` variable. Expo public variables are embedded in the client application and can be extracted.
+
+The key belongs in a Supabase Edge Function secret named `ODDS_API_KEY`.
+
+Because API keys should be treated like passwords, rotate any key that has been pasted into chat, source code, tickets or other shared text before production use.
+
+## Database setup
+
+### Fresh project
+
+Run, in order:
+
+```text
+backend/schema.sql
+backend/migrations/003_odds_api.sql
+```
+
+Do not run `backend/seed.sql` once the real odds integration is enabled unless you explicitly want demo fixtures too.
+
+### Existing v0.2 project
 
 Run:
 
 ```text
-backend/schema.sql
+backend/migrations/003_odds_api.sql
 ```
 
-For temporary demo football fixtures, then run:
+This adds The Odds API league mapping, snapshot metadata, sync telemetry and the stricter provider-backed prediction RPC.
 
-```text
-backend/seed.sql
-```
+## Supabase secrets
 
-`seed.sql` creates future Arsenal–Liverpool, Real Madrid–Inter and Milan–Juventus events plus fresh Match Winner odds snapshots. Re-run it whenever you need fresh demo odds because the prediction RPC deliberately rejects stale snapshots.
-
-## 2. Environment variables
-
-Copy:
+Set server-side secrets with the Supabase CLI or dashboard:
 
 ```bash
-cp .env.example .env
+supabase secrets set ODDS_API_KEY='<YOUR_KEY>'
+supabase secrets set ODDS_API_REGIONS='eu'
+supabase secrets set ODDS_SYNC_SECRET='<LONG_RANDOM_SECRET>'
 ```
 
-Fill in:
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are read only inside the Edge Function environment. Never expose the service-role key to the app.
+
+## Deploy Edge Functions
+
+```bash
+supabase functions deploy sync-odds
+supabase functions deploy sync-scores
+```
+
+Both functions additionally require the private `x-sync-secret` header, so a valid JWT alone is not enough to run a sync.
+
+## Trigger an odds sync
+
+Example request body:
+
+```json
+{
+  "horizonHours": 48,
+  "regions": "eu"
+}
+```
+
+Optionally sync only selected competitions:
+
+```json
+{
+  "sportKeys": [
+    "soccer_epl",
+    "soccer_uefa_champs_league",
+    "soccer_greece_super_league"
+  ],
+  "horizonHours": 48
+}
+```
+
+The function first calls `/events`, which The Odds API documents as not consuming quota. It calls `/odds` only when the league has a game inside the requested horizon.
+
+## Reference odds methodology
+
+For each Match Winner selection, v0.3 collects the available bookmaker prices returned for the configured region and stores the **median decimal price**.
+
+Example:
+
+```text
+Arsenal prices: 2.10, 2.12, 2.15, 2.18, 2.25
+Reference price: 2.15
+```
+
+Stored metadata includes `reference_odds`, `bookmaker_count`, `captured_at`, `source_last_update`, `provider` and `consensus_method = median`.
+
+This avoids tying Predictor Rating to one bookmaker and preserves snapshots for later closing-line calculations.
+
+## Prediction integrity
+
+The mobile client submits only a `marketId`, confidence, units and optional analysis.
+
+`create_prediction_from_market(...)` then verifies server-side that:
+
+1. the user is authenticated;
+2. the event is still at least 5 minutes from kickoff;
+3. the snapshot came from The Odds API integration;
+4. the reference snapshot is not older than 15 minutes;
+5. odds/selection/timestamp are copied from Postgres rather than supplied by the mobile client.
+
+After publication, core prediction fields remain immutable.
+
+## Scores
+
+`sync-scores` updates scheduled/live/completed status, home score and away score.
+
+It deliberately **does not automatically settle predictions yet**. Soccer settlement rules need a defined rules engine for regulation time, extra time, postponed/abandoned matches and future non-1X2 markets. That belongs in the next settlement milestone rather than guessing from a final score.
+
+## API quota strategy
+
+The Odds API charges the odds endpoint based on markets × regions. v0.3 therefore defaults to one region (`eu`) and one market (`h2h`).
+
+Recommended early-stage strategy:
+
+- invoke `sync-odds` every 30–60 minutes normally;
+- increase cadence near kickoff only for leagues that actually have upcoming matches;
+- keep one region (`eu`) during MVP;
+- keep only `h2h` until the prediction/reputation loop is validated.
+
+The `odds_sync_runs` table records quota headers after each successful odds request so usage can be monitored before expanding coverage.
+
+## Mobile environment
+
+The mobile app still uses only Supabase public credentials:
 
 ```env
 EXPO_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_SUPABASE_PUBLISHABLE_KEY
 ```
 
-Never put a Supabase `service_role` key in the mobile app.
-
-## 3. Install and run
+## Run the app
 
 ```bash
 npm install
@@ -125,68 +185,24 @@ npm run typecheck
 npm start
 ```
 
-Open with an emulator/device supported by the installed Expo SDK.
+## Current v0.3 boundary
 
-## 4. Test the v0.2 flow
+Working product layer:
 
-1. Create an account.
-2. Confirm email if email confirmation is enabled in Supabase.
-3. Sign in.
-4. Confirm 18+.
-5. Run `backend/seed.sql` if no events exist.
-6. Open `+` and publish a prediction.
-7. Pull-to-refresh the Home feed.
-8. Use a second account to test follow, likes, comments and community consensus.
-
-## Authentication scope
-
-v0.2 implements production-connected **email/password authentication**.
-
-Google and Apple sign-in are intentionally not hard-coded yet because they require project-specific OAuth/provider configuration, redirect URLs, Apple identifiers and signing credentials. They should be added after the Supabase project and store identities are created; no fake credentials or placeholder production OAuth flow is included.
-
-## Ratings in v0.2
-
-A new account receives a provisional overall rating row:
-
-- Rating: `50`
-- Confidence: `very_low`
-- Sample size: `0`
-
-The app already reads and displays ratings from Postgres. The actual rating computation engine belongs to v0.4, after results and closing odds exist.
-
-## v0.3 — football data + settlement
+- authentication
+- profiles
+- follows
+- likes/comments/reports
+- real upcoming football events
+- real 1X2 reference odds
+- immutable predictions
+- rankings/reputation data model
+- community consensus
 
 Next milestone:
-- choose a football-data provider
-- ingest competitions and fixtures
-- ingest results
-- refresh market snapshots
-- run automated settlement using trusted backend code
-- enforce event status/cut-off operationally
 
-## v0.4 — odds + reputation engine
-
-- closing odds
-- CLV
-- risk-adjusted ROI
-- confidence engine
-- Predictor Rating
-- league specialization
-- market specialization
-- leaderboard eligibility thresholds
-
-## v0.5 — launch readiness
-
-- Google / Apple sign-in
-- push notifications
-- share cards and public web profiles
-- admin moderation dashboard
-- analytics / telemetry
-- privacy policy / terms / account deletion UX
-- TestFlight and Google Play closed testing
-
-## Product rule
-
-**Prediction ≠ bet.**
-
-The core product measures public forecasting performance. Real-money wagering and bookmaker affiliate links remain outside this MVP.
+- automated, rules-correct settlement
+- closing odds selection from stored snapshots
+- CLV calculation
+- ROI and confidence engine
+- Predictor Rating v1
